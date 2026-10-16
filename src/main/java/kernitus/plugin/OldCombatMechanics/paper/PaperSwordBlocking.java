@@ -4,9 +4,6 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
 import java.util.function.Predicate;
 
 import org.bukkit.Bukkit;
@@ -31,9 +28,8 @@ public class PaperSwordBlocking {
     private final MethodHandle nmsApplyComponents;
     private final MethodHandle nmsSetComponent;
     private final MethodHandle nmsRemoveComponent;
-    private final MethodHandle nmsGetComponentsPatch;
-    private final MethodHandle nmsPatchGet;
-    private final MethodHandle nmsPatchEntrySet;
+    private final MethodHandle craftItemStackAsNmsCopy;
+    private final MethodHandle nmsGetComponent;
     private final Object addConsumablePatch;
     private final Object removeConsumablePatch;
     private final Object nmsConsumableType;
@@ -200,14 +196,9 @@ public class PaperSwordBlocking {
         nmsSetComponent = lookup.unreflect(findItemStackSetMethod(nmsItemStack, nmsComponentType));
         nmsRemoveComponent = lookup.unreflect(findItemStackRemoveMethod(nmsItemStack, nmsComponentType));
 
-        nmsGetComponentsPatch = lookup.unreflect(nmsItemStack.getMethod("getComponentsPatch"));
-        MethodHandle patchGet = null;
-        try {
-            patchGet = lookup.unreflect(nmsPatch.getMethod("get", nmsComponentType));
-        } catch (NoSuchMethodException ignored) {
-        }
-        nmsPatchGet = patchGet;
-        nmsPatchEntrySet = lookup.unreflect(nmsPatch.getMethod("entrySet"));
+        final Class<?> craftItemStack = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack");
+        craftItemStackAsNmsCopy = lookup.unreflect(craftItemStack.getMethod("asNMSCopy", ItemStack.class));
+        nmsGetComponent = lookup.unreflect(nmsItemStack.getMethod("get", nmsComponentType));
 
         // Detect sword blocking via active item use:
         // player.getUseItem().is(ItemTags.SWORDS)
@@ -457,26 +448,10 @@ public class PaperSwordBlocking {
             }
         }
         try {
-            final Field handleField = resolveCraftItemStackHandleField(stack);
-            final Object nms = handleField.get(stack);
-            if (nms == null) return false;
-            final Object patch = nmsGetComponentsPatch.invoke(nms);
-            if (patch == null) return false;
-            if (nmsPatchGet != null) {
-                final Object entry = nmsPatchGet.invoke(patch, nmsConsumableType);
-                if (!(entry instanceof Optional)) return false;
-                return ((Optional<?>) entry).isPresent();
-            }
-            final Object entries = nmsPatchEntrySet.invoke(patch);
-            if (!(entries instanceof Set)) return false;
-            for (final Object entryObject : (Set<?>) entries) {
-                if (!(entryObject instanceof Map.Entry)) continue;
-                final Map.Entry<?, ?> entry = (Map.Entry<?, ?>) entryObject;
-                if (entry.getKey() != nmsConsumableType) continue;
-                final Object value = entry.getValue();
-                return value instanceof Optional && ((Optional<?>) value).isPresent();
-            }
-            return false;
+            // Read the effective component, including additions and explicit removals.
+            // This also supports ordinary Bukkit stacks without a CraftItemStack handle field.
+            final Object nms = craftItemStackAsNmsCopy.invoke(stack);
+            return nms != null && nmsGetComponent.invoke(nms, nmsConsumableType) != null;
         } catch (Throwable ignored) {
             return false;
         }

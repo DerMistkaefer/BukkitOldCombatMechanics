@@ -10,6 +10,7 @@ import io.kotest.common.ExperimentalKotest
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import kernitus.plugin.OldCombatMechanics.module.ModuleSwordBlocking
+import kernitus.plugin.OldCombatMechanics.paper.PaperSwordBlocking
 import kernitus.plugin.OldCombatMechanics.utilities.Config
 import kernitus.plugin.OldCombatMechanics.utilities.storage.PlayerStorage.getPlayerData
 import kernitus.plugin.OldCombatMechanics.utilities.storage.PlayerStorage.setPlayerData
@@ -267,9 +268,16 @@ class ConsumableComponentIntegrationTest :
             val craftItemStack = Class.forName("org.bukkit.craftbukkit.inventory.CraftItemStack")
             val nmsItemStackClass = Class.forName("net.minecraft.world.item.ItemStack")
             val asNmsCopy = craftItemStack.getMethod("asNMSCopy", ItemStack::class.java)
-            val asCraftMirror = craftItemStack.getMethod("asCraftMirror", nmsItemStackClass)
+            val asCraftMirror =
+                try {
+                    craftItemStack.getMethod("asCraftMirror", nmsItemStackClass)
+                } catch (_: NoSuchMethodException) {
+                    craftItemStack.getMethod("asBukkitMirror", nmsItemStackClass)
+                }
             val nms = asNmsCopy.invoke(null, ItemStack(type))
-            return asCraftMirror.invoke(null, nms) as ItemStack
+            val mirror = asCraftMirror.invoke(null, nms) as ItemStack
+            if (craftItemStack.isInstance(mirror)) return mirror
+            return craftItemStack.getMethod("getCraftStack", ItemStack::class.java).invoke(null, mirror) as ItemStack
         }
 
         fun consumablePatchEntry(stack: ItemStack?): Optional<*>? {
@@ -580,6 +588,30 @@ class ConsumableComponentIntegrationTest :
                 player.setItemOnCursor(ItemStack(Material.AIR))
                 player.inventory.heldItemSlot = 0
                 player.updateInventory()
+            }
+        }
+
+        test("NMS consumable detection reads additions and removals without Paper hasData") {
+            if (!paperDataComponentApiPresent()) return@test
+
+            runSync {
+                val adapter = PaperSwordBlocking()
+                val paperHasData = PaperSwordBlocking::class.java.getDeclaredField("paperHasData")
+                paperHasData.isAccessible = true
+                paperHasData.set(adapter, null)
+
+                val sword = craftMirrorStack(Material.DIAMOND_SWORD)
+                adapter.hasConsumableComponent(sword) shouldBe false
+                applyConsumableComponent(sword)
+                hasConsumableComponent(sword) shouldBe true
+                adapter.hasConsumableComponent(sword) shouldBe true
+                adapter.hasConsumableComponent(ItemStack(sword)) shouldBe true
+                val nms = nmsItemStack(sword) ?: error("NMS stack missing")
+                nms.javaClass
+                    .getMethod("remove", Class.forName("net.minecraft.core.component.DataComponentType"))
+                    .invoke(nms, nmsConsumableType())
+                hasConsumableComponent(sword) shouldBe false
+                adapter.hasConsumableComponent(sword) shouldBe false
             }
         }
 
